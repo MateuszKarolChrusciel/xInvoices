@@ -1,11 +1,17 @@
 import datetime
 import openpyxl
 import os
+import pdfminerextractor as pex
 import re
 import shutil
 import sys
-from tika import parser
+import time
 from openpyxl import utils as utl
+
+try:
+    import NIPy
+except ImportError:
+    NIPy = None
 
 CURRENT_YEAR = datetime.datetime.now().strftime("%Y")
 
@@ -19,8 +25,7 @@ DEFAULT_EXCEL_FILE_NAME = f"Kupno-sprzedaż {CURRENT_YEAR}.xlsx"
 
 class Invoice:
     def __init__(self, invoice_data):
-        self._invoice_data = invoice_data
-        self._raw_content = self._invoice_data["content"]
+        self._raw_content = invoice_data
 
         self._true_raw_content = self.get_true_raw_content()
 
@@ -37,10 +42,6 @@ class Invoice:
             return True
         else:
             return False
-
-    @property
-    def invoice_data(self):
-        return self._invoice_data
 
     @property
     def raw_content(self):
@@ -92,16 +93,20 @@ class Invoice:
     def get_buyer_nip(self):
         pattern1 = r"NIP\W*\d{10}"
         pattern2 = r"NIP\W*\d{3}\W\d{3}\W\d{2}\W\d{2}"
-        pattern3 = r"NIP\W*\d{3}\W\d{2}\W\d{2}\W\d{3}"
+        pattern3 = r"NIP\W*\d{3}\W\d{2}\W\d{3}\W\d{2}"
+        pattern4 = r"NIP\W*\d{3}\W\d{2}\W\d{2}\W\d{3}"
+        pattern5 = r"NIP\W*\d{2}\W\d{2}\W\d{3}\W\d{3}"
+        pattern6 = r"NIP\W*\d{2}\W\d{3}\W\d{2}\W\d{3}"
+        pattern7 = r"NIP\W*\d{2}\W\d{3}\W\d{3}\W\d{2}"
 
-        patterns = [pattern1, pattern2, pattern3]
+        patterns = [pattern1, pattern2, pattern3, pattern4, pattern5, pattern6, pattern7]
 
         results = []
 
         for pattern in patterns:
             results.append(re.findall(pattern, self.raw_content))
 
-        correct_result = None
+        result = None
 
         for rl in results:
             if rl:
@@ -109,9 +114,20 @@ class Invoice:
                     if "773-156-23-77" in rs or "7731562377" in rs:
                         pass
                     else:
-                        correct_result = rs
+                        result = rs
             else:
                 pass
+
+        correct_result = ""
+
+        try:
+            for sign in result:
+                if not sign.isdigit():
+                    pass
+                else:
+                    correct_result = f"{correct_result}{sign}"
+        except TypeError:
+            raise NotImplementedError
 
         return f"{correct_result}"
 
@@ -128,54 +144,16 @@ class Invoice:
         return split_content
 
     def get_invoice_id(self):
-        def find_line_with_id(raw_txt_invoice_content):
-            line_w_id = None
+        pattern = r"(?:numer)(?::*)(?:\s*)(\w*(/)*\w*((/)*\w*)*)"
 
-            for line in raw_txt_invoice_content:
-                if " numer" in line.lower():
-                    line_w_id = line
-                    break
-                else:
-                    pass
+        results = re.findall(pattern, self.raw_content)
 
-            if line_w_id is None:
-                raise LookupError
+        if len(results) == 1:
+            result = results[0][0]
+        else:
+            raise NotImplementedError
 
-            return line_w_id
-
-        def find_id_indexes_in_line(line_w_id):
-            i = []
-            cl = []
-            c = 0
-            for counter, sign in enumerate(line_w_id):
-                if sign.isdigit():
-                    c += 1
-                    i.append(counter)
-                else:
-                    cl.append(c)
-
-            if 3 not in cl:
-                raise NotImplementedError
-
-            return i
-
-        def get_proper_id(line_w_id, i):
-            inv_id = line_w_id[i[0]: None]
-
-            if inv_id[-1:] == "\n" or inv_id[-1:] == "\\n":
-                inv_id = inv_id[:-1]
-            else:
-                pass
-
-            return inv_id
-
-        line_with_id = find_line_with_id(self.true_raw_content)
-
-        indexes = find_id_indexes_in_line(line_with_id)
-
-        invoice_id = get_proper_id(line_with_id, indexes)
-
-        return invoice_id
+        return result
 
     def get_payment_date(self):
         def find_line_with_pd(lines):
@@ -233,7 +211,10 @@ class Invoice:
                 else:
                     pass
 
-            return line_w_pm
+            if line_w_pm is None:
+                return "nic"
+            else:
+                return line_w_pm
 
         line_with_pm = find_line_with_pm(self.true_raw_content)
 
@@ -241,6 +222,8 @@ class Invoice:
             pm = "Gotówka"
         elif "przelew" in line_with_pm.lower():
             pm = "Przelew"
+        elif "nic" in line_with_pm.lower():
+            pm = ""
         else:
             raise ValueError
 
@@ -314,18 +297,14 @@ class Invoice:
 
         prics = list()
 
-        print(real_finds)
-
         for find in real_finds:
-            prics.append(float(find.replace(",", ".").replace(" ", "")))
+            prics.append(float(find.replace(",", ".").replace(" ", "").replace("\n", "")))
 
         prices = dict()
 
         prices["gross"] = max(prics)
         prices["vat"] = min(prics)
         prices["net"] = prices["gross"] - prices["vat"]
-
-        print(prices)
 
         return prices
 
@@ -362,7 +341,7 @@ def convert_pdf_data_files_to_invoice_obj_list(pdf_files):
         file_path = pdf_files[file]
 
         try:
-            invoices.append(Invoice(parser.from_file(file_path)))
+            invoices.append(Invoice(pex.convert_pdf_to_txt(file_path)))
         except (KeyError, NotImplementedError):
             files_to_remove.append(file)
             num_of_files_converted -= 1
@@ -418,17 +397,27 @@ def enter_data_to_workbook(invoices):
             for cell_id in reversed(cells_in_c_with_data):
                 for cl, cll in zip(worksheet[f"{cell_id + 1}"], worksheet[f"{cell_id + 2}"]):
                     if not invoice.correct:
-                        try:
-                            int(cells_in_c_with_data[cell_id].value[0:3])
-                        except ValueError:
-                            pass
-                        except TypeError:
-                            pass
+                        if type(cl.value) == datetime.datetime:
+                            cll.value = cl.value.date()
+                            cl.value = cl.value.date()
                         else:
-                            if int(invoice.invoice_id[:3]) > int(worksheet[f"C{cell_id + 1}"].value[:3]):
+                            cll.value = cl.value
+
+                        # print(invoice.payment_date)
+                        if type(worksheet[f"A{cell_id + 1}"].value) == datetime.date \
+                                and type(invoice.payment_date) == datetime.date:
+                            if invoice.payment_date > worksheet[f"A{cell_id + 1}"].value:
                                 correct_row = cell_id + 2
                                 worksheet[f"A{correct_row}"] = invoice.signing_date
-                                worksheet[f"B{correct_row}"] = invoice.buyer_nip
+
+                                if NIPy:
+                                    try:
+                                        worksheet[f"B{correct_row}"] = NIPy.nipy[invoice.buyer_nip]
+                                    except KeyError:
+                                        worksheet[f"B{correct_row}"] = invoice.buyer_nip
+                                else:
+                                    worksheet[f"B{correct_row}"] = invoice.buyer_nip
+
                                 worksheet[f"C{correct_row}"] = invoice.invoice_id
                                 worksheet[f"D{correct_row}"] = invoice.net_value
                                 worksheet[f"E{correct_row}"] = invoice.vat_value
@@ -437,15 +426,13 @@ def enter_data_to_workbook(invoices):
                                 raise StopIteration
                             else:
                                 pass
-
-                        if type(cl.value) == datetime.datetime:
-                            cll.value = cl.value.date()
                         else:
-                            cll.value = cl.value
-
+                            pass
         except StopIteration:
             print(f"\nPomyślnie wpisano dane faktury {invoice.invoice_id} do pliku wyjściowego...")
             continue
+
+        print(f"\nNie udało się wpisać danych faktury {invoice.invoice_id} do pliku wyjściowego...")
 
 
 def enter_gross_value_cells_formulas():
@@ -588,9 +575,9 @@ def verify_excel_input_file():
             user_decision = input("Czy zmienić nazwę docelowego pliku arkusza wejsciowego? (T/N): ")
             clear_console()
             if user_decision.upper() == "T":
-                entered_name = input("\nWprowadź nową nawzwę dla docelowego pliku arkusza wejsciowego: ")
+                entered_name = input("\nWprowadź nową nazwę dla docelowego pliku arkusza wejsciowego: ")
                 clear_console()
-                print(f"\nNowa nawzwa dla docelowego pliku arkusza wejsciowego: \"{entered_name}\"")
+                print(f"\nNowa nazwa dla docelowego pliku arkusza wejsciowego: \"{entered_name}\"")
                 user_confirmation = input("Czy wprowadzona nazwa jest poprawna? {T/N}: ")
 
                 if user_confirmation.upper() == "T":
@@ -693,6 +680,11 @@ def verify_output_path():
 
 
 def leave():
+    for seconds in range(10):
+        clear_console()
+        print(f"Program zakończył działanie. Zamknięcie programu nastąpi za {10 - seconds} sekund...")
+        time.sleep(1)
+
     sys.exit(0)
 
 
@@ -713,7 +705,5 @@ if __name__ == '__main__':
     format_output_file()
 
     save_excel_output_file()
-
-    input("\nProgram zakończył działanie. Wciśnij \"Enter\" aby wyjść: ")
 
     leave()
