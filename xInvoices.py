@@ -274,7 +274,7 @@ class Invoice:
         return date_when_signed
 
     def _get_raw_prices(self):
-        regex = r"(\d{1,100}\s{1,100})*\d*[,]\d\d\s*PLN"
+        regex = r"(\s)(\d{1,100}\s{1,100})*\d*[,]\d\d\s*PLN"
 
         matches = re.finditer(regex, self.raw_content, re.MULTILINE)
 
@@ -298,12 +298,12 @@ class Invoice:
         prics = list()
 
         for find in real_finds:
-            prics.append(float(find.replace(",", ".").replace(" ", "").replace("\n", "")))
+            prics.append(float(find.replace(",", ".").replace(" ", "").replace("\n", "").replace("\n", "")))
 
         prices = dict()
 
         prices["gross"] = max(prics)
-        prices["vat"] = min(prics)
+        prices["vat"] = min(prics[:2])
         prices["net"] = prices["gross"] - prices["vat"]
 
         return prices
@@ -360,7 +360,19 @@ def convert_pdf_data_files_to_invoice_obj_list(pdf_files):
 
 
 def enter_data_to_workbook(invoices):
+    invs = dict()
+
     for invoice in invoices:
+        inv_id = str()
+        for sign in invoice.invoice_id:
+            if sign.isdigit():
+                inv_id += f"{sign}"
+        invs[int(inv_id)] = invoice
+
+    keys_list = sorted(invs)
+
+    for key in keys_list:
+        invoice = invs[key]
         clear_console()
 
         print(f"Wpisuję dane faktury {invoice.invoice_id} do pliku wyjściowego...")
