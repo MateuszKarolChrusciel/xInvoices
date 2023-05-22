@@ -4,6 +4,6 @@ et-xmlfile==1.0.1
 idna==2.9
 jdcal==1.4.1
 openpyxl==3.0.3
-requests==2.23.0
+requests==2.31.0
 urllib3==1.25.9
 pdfminer==20191125
